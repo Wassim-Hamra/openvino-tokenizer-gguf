@@ -327,27 +327,28 @@ std::tuple<ov::Model, ov::Model> create_tokenizer_from_config(const std::unorder
     const std::unordered_map<std::string, std::vector<std::string>>&,
     std::vector<ov::Output>&, ov::NodeFactory&)>> tokenizer_node_parser_mapping;
 
-    //posttokenization step
+    // posttokenization step
 
     auto max_length = opset::minimum(
         opset::subtract(outputs[1], outputs[0]),
-        make_constant_node(MAX_LENGTH, ov::element::i32)
+        create_node("Constant", {}, {{"value", std::to_string(MAX_LENGTH)}})
     );
 
-    // Change begins for the left truncation
     outputs[0] = opset::subtract(outputs[1], max_length).output(0);
 
     // Left padding
     max_length = opset::reduce_max(
         opset::subtract(outputs[1], outputs[0]),
-        make_constant_node(0, ov::element::i32)
+        create_node("Constant", {}, {{"value", "0"}})
     );
+
     outputs = create_node("RaggedToDense",
-    outputs + max_length.outputs() + make_constant_node(0, ov::element::i32).outputs(),
-    {
-        {"pad_right", "false"},
-        {"pad_max_length", "false"}
-    }).outputs();
+        outputs + max_length.outputs() + create_node("Constant", {}, {{"value", "0"}}).outputs(),
+        {
+            {"pad_right", "false"},
+            {"pad_max_length", "false"}
+        }).outputs();
+
 
     for (size_t idx = 0; idx < 2; ++idx) {
         outputs[idx] = opset::convert(outputs[idx], ov::element::i64).output(0);
