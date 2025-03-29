@@ -329,14 +329,38 @@ std::tuple<ov::Model, ov::Model> create_tokenizer_from_config(const std::unorder
     auto vocab = vocab_parser_mapping.at(std::any_cast<std::string>(config["model"]))(config["tokens"]);
     outputs = detokenizer_input.outputs() + create_string_constant(vocab);
 
-    auto special_token_ids = make_constant_node(
-        np.array([idx for idx, token_type in enumerate(tokenizer_config["token_type"]) if is_special(token_type)]),
-        ov::element::i32
+    const auto& token_types = std::any_cast<std::vector<int>>(tokenizer_config.at("token_type"));
+
+    std::vector<int32_t> special_token_ids;
+    for (size_t idx = 0; idx < token_types.size(); ++idx) {
+        if (is_special(token_types[idx])) {
+            special_token_ids.push_back(static_cast<int32_t>(idx));
+        }
+    }
+
+    auto special_token_ids_const = std::make_shared<ov::op::v0::Constant>(
+        ov::element::i32,
+        ov::Shape{special_token_ids.size()},
+        special_token_ids.data()
     );
 
-    auto stop_const = make_constant_node(np.array({std::numeric_limits<int32_t>::max()}), ov::element::i32);
-    auto zero_const = make_constant_node(np.array({0}), ov::element::i32);
-    auto one_const = make_constant_node(np.array({1}), ov::element::i32);
+    auto stop_const = std::make_shared<ov::op::v0::Constant>(
+        ov::element::i32,
+        ov::Shape{},
+        std::vector<int32_t>{std::numeric_limits<int32_t>::max()}
+    );
+
+    auto zero_const = std::make_shared<ov::op::v0::Constant>(
+        ov::element::i32,
+        ov::Shape{},
+        std::vector<int32_t>{0}
+    );
+
+    auto one_const = std::make_shared<ov::op::v0::Constant>(
+        ov::element::i32,
+        ov::Shape{},
+        std::vector<int32_t>{1}
+    );
     auto sliced_skips = opset::slice(special_token_ids, zero_const, stop_const, one_const).outputs();
     outputs.push_back(sliced_skips);
 
