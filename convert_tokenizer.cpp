@@ -145,15 +145,24 @@ std::vector<unsigned char> apply_unicode_to_bytes(const std::string& token) {
 namespace ov {
     class Output {};
     class Model {};
-    class NodeFactory {
-    public:
-        Model create(const std::string& node_name, const std::vector<Output>& inputs, const std::unordered_map<std::string, std::string>& params) {
-            // Simulating the creation of a model node
-            std::cout << "Creating node: " << node_name << std::endl;
-            return Model();
-        }
-    };
-}
+    std::shared_ptr<ov::Node> create_node(
+    const std::string& node_name,
+    const std::vector<ov::Output<ov::Node>>& inputs,
+    const std::unordered_map<std::string, std::string>& params
+    ) {
+    std::cout << "Creating node: " << node_name << std::endl;
+
+    if (node_name == "Add") {
+        return std::make_shared<ov::op::v1::Add>(inputs[0], inputs[1]);
+    } else if (node_name == "Multiply") {
+        return std::make_shared<ov::op::v1::Multiply>(inputs[0], inputs[1]);
+    } else if (node_name == "Constant") {
+        int value = std::stoi(params.at("value"));
+        return std::make_shared<ov::op::v0::Constant>(ov::element::i32, ov::Shape{}, std::vector<int>{value});
+    } else {
+        throw std::runtime_error("Unsupported node type: " + node_name);
+    }
+    }
 std::vector<std::vector<unsigned char>> parse_bbpe_vocab(const std::vector<std::string>& tokens) {
     std::vector<std::vector<unsigned char>> result;
     for (const std::string& token : tokens) {
@@ -162,27 +171,30 @@ std::vector<std::vector<unsigned char>> parse_bbpe_vocab(const std::vector<std::
     return result;
 }
 
-std::vector<ov::Output> parse_bbpe_config(const std::unordered_map<std::string, std::vector<std::string>>& config,
-                                           std::vector<ov::Output>& inputs,
-                                           ov::NodeFactory& node_factory) {
-    auto vocab = parse_bbpe_vocab(config.at("tokens"));
-    inputs.insert(inputs.end(), create_string_constant(vocab).begin(), create_string_constant(vocab).end());
+std::vector<ov::Output<ov::Node>> parse_bbpe_config(
+    const std::unordered_map<std::string, std::vector<std::string>>& config,
+    std::vector<ov::Output<ov::Node>>& inputs) {
 
-    std::vector<std::tuple<std::vector<unsigned char>, std::vector<unsigned char>>> merges;
-    for (const std::string& merge : config.at("merges")) {
-        std::vector<std::string> split_merge = {/* split logic for merges */};
-        merges.push_back(std::make_tuple(
-            apply_unicode_to_bytes(split_merge[0]),
-            apply_unicode_to_bytes(split_merge[1])
-        ));
-    }
+    std::vector<std::string> vocab = config.at("tokens");
+    auto vocab_constants = create_string_constant(vocab);
+    inputs.insert(inputs.end(), vocab_constants.begin(), vocab_constants.end());
+
     std::vector<std::vector<unsigned char>> left_merges, right_merges;
-    for (const auto& merge : merges) {
-        left_merges.push_back(std::get<0>(merge));
-        right_merges.push_back(std::get<1>(merge));
+    for (const auto& merge : config.at("merges")) {
+        std::vector<std::string> split_merge;
+    std::istringstream iss(merge);
+    std::string token;
+    while (iss >> token) {
+    split_merge.push_back(token);
     }
-    inputs.insert(inputs.end(), create_string_constant(left_merges).begin(), create_string_constant(left_merges).end());
-    inputs.insert(inputs.end(), create_string_constant(right_merges).begin(), create_string_constant(right_merges).end());
+        left_merges.push_back( apply_unicode_to_bytes(split_merge[0]));
+        right_merges.push_back(apply_unicode_to_bytes(split_merge[1]));
+    }
+
+    auto left_merge_constants = create_string_constant({left_merges.begin(), left_merges.end()});
+    auto right_merge_constants = create_string_constant({right_merges.begin(), right_merges.end()});
+    inputs.insert(inputs.end(), left_merge_constants.begin(), left_merge_constants.end());
+    inputs.insert(inputs.end(), right_merge_constants.begin(), right_merge_constants.end());
 
     std::vector<std::string> special_tokens;
     std::vector<int> special_tokens_idx;
@@ -192,10 +204,12 @@ std::vector<ov::Output> parse_bbpe_config(const std::unordered_map<std::string, 
             special_tokens_idx.push_back(idx);
         }
     }
-    inputs.insert(inputs.end(), create_string_constant(special_tokens).begin(), create_string_constant(special_tokens).end());
+
+    auto special_token_constants = create_string_constant(special_tokens);
+    inputs.insert(inputs.end(), special_token_constants.begin(), special_token_constants.end());
 
     std::unordered_map<std::string, std::string> params = {
-        {"unk_token", vocab[config.at("unknown_token_id")[0]]},
+        {"unk_token", vocab[std::stoi(config.at("unknown_token_id")[0])]},
         {"fuse_unk", "True"},
         {"suffix_indicator", ""},
         {"end_suffix", ""},
@@ -203,11 +217,12 @@ std::vector<ov::Output> parse_bbpe_config(const std::unordered_map<std::string, 
         {"cache_capacity", std::to_string(std::max(int(vocab.size() * 0.2), 20000))}
     };
 
-    return node_factory.create("BPETokenizer", inputs, params);
+    return create_node("BPETokenizer", inputs, params);
 }
 
 std::unordered_map<std::string, std::function<std::vector<ov::Output>(const std::unordered_map<std::string, std::vector<std::string>>&,
-                                                               std::vector<ov::Output>&, ov::NodeFactory&)>> tokenizer_node_parser_mapping;
+                                                               std::vector<ov::Output>&, ov::Core&)>> tokenizer_node_parser_mapping;
+
 
 std::unordered_map<std::string, std::function<std::vector<std::vector<unsigned char>>(const std::vector<std::string>&)>> vocab_parser_mapping;
 
@@ -250,9 +265,10 @@ std::tuple<ov::Model, ov::Model> create_tokenizer_from_config(const std::unorder
         }
     }
 
-    NodeFactory node_factory;
+    ov::Core core;  //  Openvino core object
+
     const std::string ov_tokenizers_extension_path = "...";
-    node_factory.add_extension(ov_tokenizers_extension_path);
+    core.add_extension(ov_tokenizers_extension_path);
 
     std::vector<ov::Output<ov::Node>> tokenizer_inputs = {ov::op::v0::Parameter::create(ov::element::str, ov::PartialShape::dynamic())};
 
@@ -271,28 +287,45 @@ std::tuple<ov::Model, ov::Model> create_tokenizer_from_config(const std::unorder
     std::string special_tokens_re = std::accumulate(special_tokens.begin(), special_tokens.end(), std::string(),
         [](const std::string& a, const std::string& b) { return a.empty() ? b : a + "|" + b; });
 
-    outputs = node_factory.create("SpecialTokensSplit", outputs + create_string_constant(special_tokens_re)).outputs();
+    std::vector<ov::Output> special_tokens_re_outputs = create_string_constant(special_tokens_re);
+
+    std::vector<ov::Output> outputs_with_split = outputs;
+    outputs_with_split.insert(outputs_with_split.end(), special_tokens_re_outputs.begin(), special_tokens_re_outputs.end());
+
+    std::shared_ptr<ov::Node> special_tokens_split_node = std::make_shared<SpecialTokensSplit>(outputs_with_split);
 
 
+    model.add_node(special_tokens_split_node);
+
+    std::vector<ov::Output> final_outputs = special_tokens_split_node->outputs();
+
+
+    std::vector<ov::Output> outputs;
 
     auto split_res = split_regex_mapping.at(std::any_cast<std::string>(config["pre"]), DEFAULT_BPE_SPLIT_RE);
     for (const auto& split_re : split_res) {
-        // 6 tensors: ragged_begins[i32], ragged_ends[i32], begins[i32], ends[i32], chars[u8], skips[bool]
-        outputs.push_back(create_string_constant(split_re));
-        outputs = node_factory.create("RegexSplit", outputs,
-            {
-                {"behaviour", split_behaviour_mapping.at(split_re)},
-                {"invert", false},
-                {"max_splits", -1}
-            }).outputs();
-    }
+    // 6 tensors: ragged_begins[i32], ragged_ends[i32], begins[i32], ends[i32], chars[u8], skips[bool]
+    auto split_constant = create_string_constant(split_re);
+    outputs.push_back(split_constant);
+
+    std::shared_ptr<ov::Node> regex_split_node = std::make_shared<ov::op::v0::SomeOp>(outputs);
+
+    regex_split_node->set_parameter("behaviour", split_behaviour_mapping.at(split_re));
+    regex_split_node->set_parameter("invert", false);
+    regex_split_node->set_parameter("max_splits", -1);
+
+    model.add_node(regex_split_node);
+
+    outputs = regex_split_node->outputs();
+}
 
 
     //tokenization step
 
 
-    outputs = tokenizer_node_parser_mapping.at(std::any_cast<std::string>(config["model"]))(config, outputs, node_factory);
-
+    std::unordered_map<std::string, std::function<std::vector<ov::Output>(
+    const std::unordered_map<std::string, std::vector<std::string>>&,
+    std::vector<ov::Output>&, ov::NodeFactory&)>> tokenizer_node_parser_mapping;
 
     //posttokenization step
 
@@ -309,9 +342,11 @@ std::tuple<ov::Model, ov::Model> create_tokenizer_from_config(const std::unorder
         opset::subtract(outputs[1], outputs[0]),
         make_constant_node(0, ov::element::i32)
     );
-    outputs = node_factory.create("RaggedToDense", outputs + max_length.outputs() + make_constant_node(0, ov::element::i32).outputs(), {
-        {"pad_right", false},
-        {"pad_max_length", false}
+    outputs = create_node("RaggedToDense",
+    outputs + max_length.outputs() + make_constant_node(0, ov::element::i32).outputs(),
+    {
+        {"pad_right", "false"},
+        {"pad_max_length", "false"}
     }).outputs();
 
     for (size_t idx = 0; idx < 2; ++idx) {
@@ -364,9 +399,9 @@ std::tuple<ov::Model, ov::Model> create_tokenizer_from_config(const std::unorder
     auto sliced_skips = opset::slice(special_token_ids, zero_const, stop_const, one_const).outputs();
     outputs.push_back(sliced_skips);
 
-    outputs = node_factory.create("VocabDecoder", outputs).outputs();
+    outputs = create_node("VocabDecoder", outputs).outputs();
+    outputs = create_node("FuzeRagged", outputs).outputs();
 
-    outputs = node_factory.create("FuzeRagged", outputs).outputs();
 
     // TODO: add clean_up_tokenization_spaces step, utf-8 check
 
